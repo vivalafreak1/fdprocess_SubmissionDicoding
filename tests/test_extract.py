@@ -1,4 +1,5 @@
-import pytest
+import requests
+from bs4 import BeautifulSoup
 from utils.extract import extract_product_data, scrape_page, scrape_all_pages
 from unittest.mock import patch, Mock
 
@@ -32,9 +33,9 @@ def test_extract_defaults():
 
 def test_scrape_page_connection_error():
     mock_session = Mock()
-    mock_session.get.side_effect = Exception("Connection failed")
-    with pytest.raises(Exception):
-        scrape_page(mock_session, 1)
+    mock_session.get.side_effect = requests.exceptions.RequestException("Connection failed")
+    products = scrape_page(mock_session, 1)
+    assert products == []  # karena fungsi menelan error dan return []
 
 def test_extract_product_data_error_handling():
     # Simulate missing elements
@@ -145,3 +146,50 @@ def test_scrape_all_pages_handles_exception_then_recovers(mock_scrape_page):
     assert data[0]['Title'] == 'OK'
     # pastikan dipanggil 2 kali sesuai range(1,2)
     assert mock_scrape_page.call_count == 2
+
+
+def test_extract_product_data_exception_path():
+    # Paksa .find melempar exception agar masuk except di extract_product_data
+    bad_card = Mock()
+    bad_card.find.side_effect = Exception("parse error")
+    res = extract_product_data(bad_card, 'ts')
+    # Pastikan fallback default dikembalikan
+    assert res['Title'] == "Unknown Product"
+    assert res['Price'] == "Price Unavailable"
+
+def test_scrape_page_request_exception_path():
+    mock_session = Mock()
+    mock_session.get.side_effect = requests.exceptions.RequestException("down")
+    out = scrape_page(mock_session, 1)
+    assert out == []  # ditangani dan return []
+
+@patch('utils.extract.requests.Session')
+def test_scrape_all_pages_top_level_exception(mock_sess):
+    # Paksa pembuatan session raise untuk memukul except global (baris 79-81)
+    mock_sess.side_effect = Exception("session init failed")
+    res = scrape_all_pages(1, 1)
+    assert res == []
+
+@patch('utils.extract.time.sleep', lambda x: None)
+@patch('utils.extract.scrape_page', side_effect=requests.exceptions.RequestException("per-page fail"))
+def test_scrape_all_pages_inner_request_exception(mock_sp):
+    # Memukul except requests.exceptions.RequestException dalam loop (baris 73)
+    res = scrape_all_pages(1, 1)
+    assert res == []
+
+def test_scrape_page_parsing_exception_path():
+    # Buat response yang menyebabkan BeautifulSoup/parse sequence error di list comprehension
+    class BadResponse:
+        def raise_for_status(self): pass
+        @property
+        def content(self):
+            # card ada tapi object-nya bukan BS element dan akan memicu error saat diproses
+            return b"<html><body><div class='collection-card'></div></body></html>"
+
+    mock_session = Mock()
+    mock_session.get.return_value = BadResponse()
+
+    # Patch extract_product_data agar melempar saat dipanggil di list comprehension
+    with patch('utils.extract.extract_product_data', side_effect=Exception("parse boom")):
+        out = scrape_page(mock_session, 1)
+        assert out == []  # harus masuk except Exception dan return []

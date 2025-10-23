@@ -7,14 +7,19 @@ def save_csv(df, path='products.csv'):
         df.to_csv(path, index=False)
         return path
     except Exception as e:
-        print(f"Error saving CSV: {e}")
         return False
 
 def save_google_sheets(df, name, creds_json):
-    scopes = ['https://www.googleapis.com/auth/spreadsheets',
-              'https://www.googleapis.com/auth/drive']
-    creds = Credentials.from_service_account_file(creds_json, scopes=scopes)
-    client = gspread.authorize(creds)
+    try:
+        scopes = ['https://www.googleapis.com/auth/spreadsheets',
+                  'https://www.googleapis.com/auth/drive']
+        creds = Credentials.from_service_account_file(creds_json, scopes=scopes)
+        client = gspread.authorize(creds)
+    except FileNotFoundError:
+        raise
+    except Exception:
+        raise
+
     try:
         sh = client.open(name)
         ws = sh.sheet1
@@ -22,7 +27,9 @@ def save_google_sheets(df, name, creds_json):
     except gspread.SpreadsheetNotFound:
         sh = client.create(name)
         ws = sh.sheet1
+        # pastikan akun reviewer bisa mengakses (anyone writer)
         sh.share(None, perm_type='anyone', role='writer')
+        
     data = df.copy()
     data['Timestamp'] = data['Timestamp'].astype(str)
     ws.update([data.columns.tolist()] + data.values.tolist())
