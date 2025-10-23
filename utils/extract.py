@@ -34,7 +34,7 @@ def extract_product_data(card, timestamp):
 
 def scrape_page(session, page_num):
     try:
-        url = "https://fashion-studio.dicoding.dev/" if page_num == 1 else f"https://fashion-studio.dicoding.dev/?page={page_num}"
+        url = "https://fashion-studio.dicoding.dev/" if page_num == 1 else f"https://fashion-studio.dicoding.dev/page{page_num}"
         resp = session.get(url, timeout=10)
         resp.raise_for_status()
         soup = BeautifulSoup(resp.content, "html.parser")
