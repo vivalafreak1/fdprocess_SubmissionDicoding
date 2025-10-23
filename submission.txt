@@ -8,4 +8,8 @@ python3 -m pytest tests
 coverage run -m pytest tests
 
 # Url Google Sheets:
-https://docs.google.com/sheets
+https://docs.google.com/spreadsheets/d/12UQglo7VEwF32A5YoF_GQrWZOsily6zbq8usZn5ghD4/edit?usp=sharing
+
+# Postgres
+db: fashion
+user: developer

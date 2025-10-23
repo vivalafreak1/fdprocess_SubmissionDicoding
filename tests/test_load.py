@@ -1,210 +1,255 @@
-import pandas as pd
 import os
 import pytest
-from utils.load import save_csv, save_google_sheets
+import pandas as pd
 from unittest.mock import patch, MagicMock
+from utils.load import (
+    save_csv, save_google_sheets,
+    make_pg_engine, ensure_products_table, save_postgres
+)
+
+# -------------------- Shared fixtures --------------------
+
+@pytest.fixture
+def df_ok():
+    # Minimal schema used by Sheets; Timestamp as str for Sheets
+    return pd.DataFrame({
+        "Title": ["A","B"],
+        "Price": [1000.0, 2000.0],
+        "Rating": [4.0, 3.5],
+        "Colors": [2, 3],
+        "Size": ["M","L"],
+        "Gender": ["Men","Women"],
+        "Timestamp": ["2025-01-01T00:00:00","2025-01-02T00:00:00"]
+    })
+
+@pytest.fixture
+def df_pg_ok():
+    # Timestamp as pandas datetime for Postgres
+    return pd.DataFrame({
+        "Title": ["A","B"],
+        "Price": [1000.0, 2000.0],
+        "Rating": [4.0, 3.5],
+        "Colors": [2, 3],
+        "Size": ["M","L"],
+        "Gender": ["Men","Women"],
+        "Timestamp": pd.to_datetime(["2025-01-01T00:00:00","2025-01-02T00:00:00"])
+    })
+
+@pytest.fixture
+def gs_client_mocks():
+    mock_client = MagicMock()
+    mock_sh = MagicMock()
+    mock_ws = MagicMock()
+    mock_sh.sheet1 = mock_ws
+    mock_sh.url = "https://sheet.url"
+    return mock_client, mock_sh, mock_ws
+
+# -------------------- CSV --------------------
 
 def test_save_csv(tmp_path):
-    df = pd.DataFrame({'A':[1]})
-    path = tmp_path/'out.csv'
-    res = save_csv(df,str(path))
+    df = pd.DataFrame({"A":[1]})
+    path = tmp_path/"out.csv"
+    res = save_csv(df, str(path))
     assert os.path.exists(res)
 
-@patch('utils.load.gspread.authorize')
-@patch('utils.load.Credentials.from_service_account_file')
-def test_save_google(mon_creds, mon_auth):
-    df = pd.DataFrame({'A':[1],'Timestamp':['2025']})
-    mock_client = MagicMock()
-    mock_sh = MagicMock()
-    mock_sh.url = 'url'
-    mock_sh.sheet1 = MagicMock()
-    mock_client.open.return_value=mock_sh
-    mon_auth.return_value=mock_client
-    res = save_google_sheets(df,'Name','creds.json')
-    assert 'url' in res or res is None
-
 def test_save_csv_io_error(monkeypatch):
-    df = pd.DataFrame({'A':[1]})
-    def raise_os_error(*args, **kwargs): raise OSError("Disk full")
-    monkeypatch.setattr(df, "to_csv", raise_os_error)
-    assert save_csv(df, "badfile.csv") is False
+    df = pd.DataFrame({"A":[1]})
+    def boom(*a, **k): raise OSError("disk full")
+    monkeypatch.setattr(df, "to_csv", boom)
+    assert save_csv(df, "bad.csv") is False
 
-@patch('utils.load.Credentials.from_service_account_file')
-@patch('utils.load.gspread.authorize')
-def test_save_google_sheets_create_spreadsheet(mock_authorize, mock_creds):
-    import gspread  # penting: gunakan tipe Exception yg tepat
-    mock_client = MagicMock()
-    mock_sh = MagicMock()
-    mock_ws = MagicMock()
-    mock_sh.sheet1 = mock_ws
-    mock_sh.url = 'https://sheet.url'
-    created = {'v': False}
+# -------------------- Google Sheets --------------------
 
-    def create_side_effect(name):
-        created['v'] = True
-        return mock_sh
-
-    mock_authorize.return_value = mock_client
-    mock_creds.return_value = object()
-
-    mock_client.open.side_effect = gspread.SpreadsheetNotFound("not found")
-    mock_client.create.side_effect = create_side_effect
-
-    url = save_google_sheets(pd.DataFrame({'A':[1], 'Timestamp':['2025']}), 'sheet_name', 'creds.json')
-    assert created['v'] is True
-    assert url == 'https://sheet.url'
-
-@patch('utils.load.Credentials.from_service_account_file')
-@patch('utils.load.gspread.authorize')
-def test_save_google_sheets_auth_exception(mock_auth, mock_creds):
-    # Paksa kredensial melempar error untuk memukul except kredensial/authorize (18-21)
-    mock_creds.side_effect = FileNotFoundError("no creds")
-    with pytest.raises(FileNotFoundError):
-        save_google_sheets(pd.DataFrame({'Timestamp':['2025']}), 'name', 'missing.json')
-
-@patch('utils.load.Credentials.from_service_account_file')
-@patch('utils.load.gspread.authorize')
-def test_save_google_sheets_update_error(mock_authorize, mock_creds):
-    # Setup client dan sheet sukses, tapi update() melempar error
-    mock_client = MagicMock()
-    mock_sh = MagicMock()
-    mock_ws = MagicMock()
-    mock_sh.sheet1 = mock_ws
-    mock_sh.url = 'https://sheet.url'
+@patch("utils.load.gspread.authorize")
+@patch("utils.load.Credentials.from_service_account_file")
+def test_sheets_happy_path(mock_creds, mock_auth, df_ok, gs_client_mocks):
+    mock_client, mock_sh, mock_ws = gs_client_mocks
     mock_client.open.return_value = mock_sh
-
-    mock_authorize.return_value = mock_client
+    mock_auth.return_value = mock_client
     mock_creds.return_value = object()
 
-    # Paksa update melempar
-    mock_ws.update.side_effect = Exception("update fail")
-
-    # Biarkan exception propagate (fungsi tidak menangkap ini), sehingga test memukul baris 20–21
-    with pytest.raises(Exception):
-        save_google_sheets(pd.DataFrame({'Timestamp':['2025']}), 'sheet', 'creds.json')
-
-@patch('utils.load.Credentials.from_service_account_file')
-@patch('utils.load.gspread.authorize')
-def test_save_google_sheets_happy_path_calls_update(mock_authorize, mock_creds):
-    # Arrange: authorize OK, open OK, ws.clear dan ws.update terpanggil
-    mock_client = MagicMock()
-    mock_sh = MagicMock()
-    mock_ws = MagicMock()
-    mock_sh.sheet1 = mock_ws
-    mock_sh.url = 'https://sheet.url'
-    mock_client.open.return_value = mock_sh
-
-    mock_authorize.return_value = mock_client
-    mock_creds.return_value = object()
-
-    df = pd.DataFrame({'A':[1], 'Timestamp':['2025-01-01T00:00:00']})
-
-    # Act
-    url = save_google_sheets(df, 'Existing Sheet', 'creds.json')
-
-    # Assert: memastikan clear dan update (baris 20–21) dieksekusi
+    url = save_google_sheets(df_ok, "Existing", "creds.json")
+    assert url == "https://sheet.url"
+    mock_client.open.assert_called_once_with("Existing")
     mock_ws.clear.assert_called_once()
     assert mock_ws.update.call_count == 1
-    assert url == 'https://sheet.url'
 
-@patch('utils.load.Credentials.from_service_account_file')
-@patch('utils.load.gspread.authorize')
-def test_save_google_sheets_create_branch_updates_after_share(mock_authorize, mock_creds):
+@patch("utils.load.gspread.authorize")
+@patch("utils.load.Credentials.from_service_account_file")
+def test_sheets_create_branch(mock_creds, mock_auth, df_ok, gs_client_mocks):
     import gspread
-    # Arrange: authorize OK
-    mock_client = MagicMock()
-    # open() melempar SpreadsheetNotFound supaya masuk cabang except
-    mock_client.open.side_effect = gspread.SpreadsheetNotFound("not found")
-
-    # create() mengembalikan sheet baru
-    mock_new_sh = MagicMock()
-    mock_ws = MagicMock()
-    mock_new_sh.sheet1 = mock_ws
-    mock_new_sh.url = 'https://created-sheet.url'
-    mock_client.create.return_value = mock_new_sh
-
-    mock_authorize.return_value = mock_client
-    mock_creds.return_value = object()
-
-    df = pd.DataFrame({'A':[1], 'Timestamp':['2025-01-01T00:00:00']})
-
-    # Act
-    url = save_google_sheets(df, 'New Sheet', 'creds.json')
-
-    # Assert: pastikan cabang except berjalan (create + share), lalu update dipanggil
-    mock_client.open.assert_called_once()
-    mock_client.create.assert_called_once_with('New Sheet')
-    mock_new_sh.share.assert_called_once()          # baris di cabang except
-    mock_ws.update.assert_called_once()             # baris setelah cabang except
-    assert url == 'https://created-sheet.url'
-
-@patch('utils.load.Credentials.from_service_account_file')
-@patch('utils.load.gspread.authorize')
-def test_save_google_sheets_create_branch_full_flow(mock_authorize, mock_creds, monkeypatch):
-    import gspread
-    mock_client = MagicMock()
-
-    # open gagal → masuk except
+    mock_client, mock_sh, mock_ws = gs_client_mocks
     mock_client.open.side_effect = gspread.SpreadsheetNotFound("nf")
-
-    # objek hasil create
-    mock_new_sh = MagicMock()
-    mock_ws = MagicMock()
-    mock_new_sh.sheet1 = mock_ws
-    mock_new_sh.url = 'https://created.url'
-    mock_client.create.return_value = mock_new_sh
-
-    mock_authorize.return_value = mock_client
-    mock_creds.return_value = object()
-
-    # Spying df.copy agar jalur setelah except benar-benar dieksekusi
-    df = pd.DataFrame({'A':[1], 'Timestamp':['2025-01-01T00:00:00']})
-    copy_called = {'v': False}
-    real_copy = df.copy
-    def copy_wrapper(*a, **k):
-        copy_called['v'] = True
-        return real_copy(*a, **k)
-    monkeypatch.setattr(df, "copy", copy_wrapper)
-
-    url = save_google_sheets(df, 'Brand New', 'creds.json')
-
-    # Verifikasi urutan dan objek yang dipakai
-    mock_client.open.assert_called_once()
-    mock_client.create.assert_called_once_with('Brand New')
-    mock_new_sh.share.assert_called_once_with(None, perm_type='anyone', role='writer')  # baris 20
-    assert copy_called['v'] is True                                                     # baris 21 (df.copy)
-    mock_ws.update.assert_called_once()
-    assert url == 'https://created.url'
-
-@patch('utils.load.gspread.authorize')
-@patch('utils.load.Credentials.from_service_account_file')
-def test_save_google_sheets_create_branch_hits_share_and_copy(mock_creds, mock_authorize, monkeypatch):
-    import gspread
-    mock_client = MagicMock()
-    mock_client.open.side_effect = gspread.SpreadsheetNotFound("nf")
-
-    mock_sh = MagicMock()
-    mock_ws = MagicMock()
-    mock_sh.sheet1 = mock_ws
-    mock_sh.url = 'https://created.url'
     mock_client.create.return_value = mock_sh
-
-    mock_authorize.return_value = mock_client
+    mock_auth.return_value = mock_client
     mock_creds.return_value = object()
 
-    df = pd.DataFrame({'A':[1], 'Timestamp':['2025-01-01T00:00:00']})
-    copy_called = {'v': False}
-    real_copy = df.copy
-    def copy_wrapper(*args, **kwargs):
-        copy_called['v'] = True
-        return real_copy(*args, **kwargs)
-    monkeypatch.setattr(df, "copy", copy_wrapper)
-
-    url = save_google_sheets(df, 'Brand New', 'creds.json')
-
+    url = save_google_sheets(df_ok, "NewSheet", "creds.json")
     mock_client.open.assert_called_once()
-    mock_client.create.assert_called_once_with('Brand New')
-    mock_sh.share.assert_called_once_with(None, perm_type='anyone', role='writer')
-    assert copy_called['v'] is True
+    mock_client.create.assert_called_once_with("NewSheet")
+    mock_sh.share.assert_called_once()
     mock_ws.update.assert_called_once()
-    assert url == 'https://created.url'
+    assert url == "https://sheet.url"
+
+@patch("utils.load.gspread.authorize")
+@patch("utils.load.Credentials.from_service_account_file")
+def test_sheets_creds_not_found(mock_creds, mock_auth, df_ok):
+    mock_creds.side_effect = FileNotFoundError("missing")
+    with pytest.raises(FileNotFoundError):
+        save_google_sheets(df_ok, "X", "missing.json")
+
+@patch("utils.load.gspread.authorize")
+@patch("utils.load.Credentials.from_service_account_file")
+def test_sheets_update_error_raised(mock_creds, mock_auth, df_ok, gs_client_mocks):
+    mock_client, mock_sh, mock_ws = gs_client_mocks
+    mock_client.open.return_value = mock_sh
+    mock_auth.return_value = mock_client
+    mock_creds.return_value = object()
+    mock_ws.update.side_effect = Exception("update fail")
+
+    with pytest.raises(Exception):
+        save_google_sheets(df_ok, "Existing", "creds.json")
+
+# -------------------- PostgreSQL helpers --------------------
+
+@patch("utils.load.create_engine")
+def test_make_pg_engine_ok(mock_ce):
+    mock_engine = MagicMock()
+    mock_ce.return_value = mock_engine
+    # connect().execute() path
+    ctx = MagicMock()
+    ctx.__enter__.return_value = MagicMock()
+    mock_engine.connect.return_value = ctx.__enter__.return_value
+    mock_engine.connect.return_value.execute.return_value = None
+    eng = make_pg_engine()
+    assert eng is mock_engine
+
+@patch("utils.load.create_engine")
+def test_make_pg_engine_fail_connect(mock_ce):
+    mock_engine = MagicMock()
+    mock_ce.return_value = mock_engine
+    mock_engine.connect.side_effect = Exception("connect fail")
+    eng = make_pg_engine()
+    assert eng is None
+
+@patch("utils.load.text")
+def test_ensure_products_table_ok(mock_text):
+    engine = MagicMock()
+    # engine.begin() context manager
+    begin_ctx = MagicMock()
+    begin_ctx.__enter__.return_value = MagicMock()
+    engine.begin.return_value = begin_ctx
+    ensure_products_table(engine)
+    engine.begin.assert_called_once()
+
+def test_ensure_products_table_none_engine():
+    with pytest.raises(RuntimeError):
+        ensure_products_table(None)
+
+@patch("utils.load.text")
+def test_ensure_products_table_ddl_error(mock_text):
+    engine = MagicMock()
+    begin_ctx = MagicMock()
+    conn = MagicMock()
+    begin_ctx.__enter__.return_value = conn
+    engine.begin.return_value = begin_ctx
+    # Simulate execute boom on first DDL
+    conn.execute.side_effect = Exception("ddl boom")
+    with pytest.raises(Exception):
+        ensure_products_table(engine)
+
+# -------------------- save_postgres paths --------------------
+
+@patch("utils.load.ensure_products_table")
+@patch("utils.load.make_pg_engine")
+@patch("utils.load.text")
+def test_save_postgres_insert_ok(mock_text, mock_engine_mk, mock_ensure, df_pg_ok):
+    engine = MagicMock()
+    ctx = MagicMock()
+    conn = MagicMock()
+    ctx.__enter__.return_value = conn
+    engine.begin.return_value = ctx
+    mock_engine_mk.return_value = engine
+
+    n = save_postgres(df_pg_ok)
+    assert n == len(df_pg_ok)
+    mock_engine_mk.assert_called_once()
+    mock_ensure.assert_called_once_with(engine)
+    engine.begin.assert_called_once()
+    assert conn.execute.call_count == 1
+
+@patch("utils.load.ensure_products_table")
+@patch("utils.load.make_pg_engine")
+@patch("utils.load.text")
+def test_save_postgres_engine_none_short_circuit(mock_text, mock_engine_mk, mock_ensure, df_pg_ok):
+    mock_engine_mk.return_value = None
+    n = save_postgres(df_pg_ok)
+    assert n == 0
+    mock_ensure.assert_not_called()
+
+@patch("utils.load.ensure_products_table")
+@patch("utils.load.make_pg_engine")
+@patch("utils.load.text")
+def test_save_postgres_object_price_cleanup(mock_text, mock_engine_mk, mock_ensure):
+    # price as strings without $, ensure to_numeric coercion works
+    df = pd.DataFrame({
+        "Title": ["A","B"],
+        "Price": ["12345.67","89000"],
+        "Rating": ["4.5","3.0"],
+        "Colors": ["2","3"],
+        "Size": ["M","L"],
+        "Gender": ["Men","Women"],
+        "Timestamp": pd.to_datetime(["2025-01-01","2025-01-02"])
+    })
+    engine = MagicMock()
+    ctx = MagicMock()
+    conn = MagicMock()
+    ctx.__enter__.return_value = conn
+    engine.begin.return_value = ctx
+    mock_engine_mk.return_value = engine
+
+    n = save_postgres(df)
+    assert n == 2
+    assert conn.execute.call_count == 1
+
+@patch("utils.load.ensure_products_table")
+@patch("utils.load.make_pg_engine")
+@patch("utils.load.text")
+def test_save_postgres_dollar_to_idr(mock_text, mock_engine_mk, mock_ensure):
+    # price contains $; should be sanitized and numeric
+    df = pd.DataFrame({
+        "Title": ["A"],
+        "Price": ["$10.00"],
+        "Rating": [3.0],
+        "Colors": [2],
+        "Size": ["M"],
+        "Gender": ["Men"],
+        "Timestamp": pd.to_datetime(["2025-01-01"])
+    })
+    engine = MagicMock()
+    ctx = MagicMock()
+    conn = MagicMock()
+    ctx.__enter__.return_value = conn
+    engine.begin.return_value = ctx
+    mock_engine_mk.return_value = engine
+
+    n = save_postgres(df)
+    assert n == 1
+    conn.execute.assert_called_once()
+
+@patch("utils.load.ensure_products_table")
+@patch("utils.load.make_pg_engine")
+def test_save_postgres_dropna_all(mock_engine_mk, mock_ensure):
+    # All rows invalid -> empty after dropna
+    df = pd.DataFrame({
+        "Title": [None],
+        "Price": [None],
+        "Rating": [None],
+        "Colors": [None],
+        "Size": [None],
+        "Gender": [None],
+        "Timestamp": [pd.NaT]
+    })
+    mock_engine_mk.return_value = MagicMock()
+    n = save_postgres(df)
+    assert n == 0

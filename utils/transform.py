@@ -4,10 +4,8 @@ import numpy as np
 def clean_price(s):
     try:
         s = s.replace('Price Unavailable', np.nan)
-        if not pd.api.types.is_string_dtype(s):
-            return s
-        num = s.str.replace('$','',regex=False).str.replace(',','',regex=False)
-        num = pd.to_numeric(num, errors='coerce') * 16000
+        s = s.astype(str).str.replace('$','',regex=False).str.replace(',','',regex=False)
+        num = pd.to_numeric(s, errors='coerce') * 16000
         return num
     except Exception:
         return pd.to_numeric(pd.Series([np.nan]*len(s)), errors='coerce')
@@ -53,6 +51,15 @@ def transform_data(raw):
         df = df.dropna()
         df = df.drop_duplicates().reset_index(drop=True)
         df['Timestamp'] = pd.to_datetime(df['Timestamp'])
+
+        df = df.astype({
+            "Price":"float64",
+            "Rating":"float64",
+            "Colors":"int64",
+            "Size":"object",
+            "Gender":"object"
+        })
+
         return df
     except Exception:
         # jika transform gagal total, kembalikan df kosong agar tahap load aman
